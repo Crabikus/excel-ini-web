@@ -99,6 +99,7 @@ def excel_to_ini(excel_path):
         ini_lines.pop(0)
     while ini_lines and ini_lines[-1] == "":
         ini_lines.pop()
+    ini_lines.append(f"SourceMsg_Num = {entry_num-1}")
     return '\n'.join(ini_lines)
 
 @app.route("/", methods=["GET", "POST"])

@@ -1,0 +1,4 @@
+<head>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=fe1ac9fc-e3f2-45b2-83b6-ea2c00278ab4&lang=ru_RU" type="text/javascript">
+    </script>
+</head>
