@@ -1,0 +1,104 @@
+import pandas as pd
+import re
+
+excel_path = r'C:\Users\mikhail.zernov\Documents\routingconfig\RoutingMAP-CGW_V5.2.0_20250705.xlsx'
+df = pd.read_excel(excel_path, sheet_name="RouteTable", dtype=str, header=None)
+
+ini_lines = ["[MsgRouter]"]
+entry_num = 1
+source_matrix, target_matrix = None, None
+last_buspair = None
+first_block = True
+
+def infer_bus_code(matrix_string):
+    # Map known matrix name patterns to short bus codes (add more patterns as needed)
+    matrix_string = matrix_string.upper()
+    if "Matrix_SGW-CGW" in matrix_string or "Matrix_CGW-SGW" in matrix_string or "SG" in matrix_string:
+        return "SG"
+    if "Matrix_ET" in matrix_string or "ET" in matrix_string:
+        return "ET"
+    if "Matrix_BD" in matrix_string:
+        return "BD"
+    if "Matrix_PT" in matrix_string:
+        return "PT"
+    if "Matrix_CH" in matrix_string:
+        return "CH"
+    if "Matrix_DZ" in matrix_string:
+        return "DZ"
+    if "Matrix_DG" in matrix_string:
+        return "DG"
+    # fallback:
+    m = re.search(r'\b([A-Z]{2,})(?=CAN\b)', matrix_string)
+    if m:
+        return m.group(1)
+    m2 = re.findall(r'[A-Z]{2,}', matrix_string)
+    return m2[0] if m2 else matrix_string[:2].upper()
+
+for i, row in df.iterrows():
+    row_values = [str(cell).strip() if pd.notnull(cell) else "" for cell in row.tolist()]
+
+    # Identify start of block/group by both Source and Target info
+    if row_values[0].startswith("Source:") and any(x.startswith("Target:") for x in row_values):
+        source_matrix = row_values[0].split(":", 1)[-1].strip()
+        target_matrix = ""
+        for val in row_values:
+            if val.startswith("Target:"):
+                target_matrix = val.split(":", 1)[-1].strip()
+                break
+        source_bus = infer_bus_code(source_matrix)
+        target_bus = infer_bus_code(target_matrix)
+        # Add block header if bus pair changes
+        block_header = f"# ----------- {source_bus} -> {target_bus} ----------------"
+        if block_header != last_buspair:
+            if not first_block:
+                ini_lines.append("")  # Only blank line before second and later blocks
+            ini_lines.append(block_header)
+            last_buspair = block_header
+            first_block = False
+        continue
+
+    # Detect start of column headers
+    if "Message Name" in row_values or "Message ID" in row_values:
+        # Save column indices for this block
+        try:
+            s_name_idx = row_values.index("Message Name")
+            s_id_idx = row_values.index("Message ID")
+            d_name_idx = row_values.index("Message Name", s_name_idx + 1)
+            d_id_idx = row_values.index("Message ID", s_id_idx + 1)
+        except ValueError:
+            continue
+        continue
+
+    # Only use rows with valid message info for both sides
+    if (
+        source_matrix and target_matrix and
+        len(row_values) > max(d_id_idx, s_name_idx, d_name_idx, s_id_idx)
+        and row_values[s_name_idx] and row_values[d_name_idx]
+        and row_values[s_id_idx] and row_values[d_id_idx]
+        and not any(
+            row_values[x].strip().startswith("Message") or
+            row_values[x].strip().startswith("Signal")
+            for x in [s_name_idx, d_name_idx]
+        )
+    ):
+        ini_lines.append(f"SourceMsg{entry_num}_Name = {row_values[s_name_idx]}")
+        ini_lines.append(f"SourceMsg{entry_num}_ID = {row_values[s_id_idx]}")
+        ini_lines.append(f"SourceMsg{entry_num}_CAN = {source_bus}CAN")
+        ini_lines.append(f"DestiMsg{entry_num}_Name = {row_values[d_name_idx]}")
+        ini_lines.append(f"DestiMsg{entry_num}_ID = {row_values[d_id_idx]}")
+        ini_lines.append(f"DestiMsg{entry_num}_CAN = {target_bus}CAN")
+        ini_lines.append(f"ChangReMsg{entry_num} = 0")
+        entry_num += 1
+
+# Remove leading blank lines:
+while ini_lines and ini_lines[0] == "":
+    ini_lines.pop(0)
+# Remove trailing blank lines:
+while ini_lines and ini_lines[-1] == "":
+    ini_lines.pop()
+# Write the .ini file
+ini_file = r'C:\Users\mikhail.zernov\Documents\routingconfig\autogen_MsgRouterInfo.ini'
+with open(ini_file, 'w', encoding='utf-8') as f:
+    f.write('\n'.join(ini_lines))
+
+print(f"[SUCCESS] INI generated at:\n{ini_file}")

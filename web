@@ -1,0 +1,121 @@
+import os
+import tempfile
+import pandas as pd
+import re
+from flask import Flask, request, send_file, render_template_string
+
+app = Flask(__name__)
+
+HTML_FORM = '''
+<!DOCTYPE html>
+<html>
+<head><title>Excel to INI Generator</title></head>
+<body>
+    <h2>Upload Routing Excel File</h2>
+    <form action="/" method="post" enctype="multipart/form-data">
+        <input type="file" name="excel" required>
+        <button type="submit">Convert to .ini</button>
+    </form>
+</body>
+</html>
+'''
+
+def infer_bus_code(matrix_string):
+    matrix_string = matrix_string.upper() if matrix_string else ""
+
+    if "MATRIX_DZ" in matrix_string or "DZ" in matrix_string:
+        return "DZ"
+    if "MATRIX_DG" in matrix_string or "DG" in matrix_string:
+        return "DG"
+    if "MATRIX_CH" in matrix_string or "CH" in matrix_string:
+        return "CH"
+    if "MATRIX_BD" in matrix_string or "BD" in matrix_string:
+        return "BD"
+    if "MATRIX_PT" in matrix_string or "PT" in matrix_string:
+        return "PT"
+    if "MATRIX_SGW-CGW" in matrix_string or "MATRIX_CGW-SGW" in matrix_string or "SG" in matrix_string:
+        return "SG"
+    if "MATRIX_ET" in matrix_string or "ET" in matrix_string:
+        return "ET"
+
+    # If none match, report error instead of returning junk
+    raise ValueError(f"Unknown bus type in matrix name: {matrix_string}")
+
+def excel_to_ini(excel_path):
+    df = pd.read_excel(excel_path, sheet_name="RouteTable", dtype=str, header=None)
+    ini_lines = ["[MsgRouter]"]
+    entry_num = 1
+    source_matrix, target_matrix = None, None
+    last_buspair = None
+    first_block = True
+
+    for i, row in df.iterrows():
+        row_values = [str(cell).strip() if pd.notnull(cell) else "" for cell in row.tolist()]
+        if row_values[0].startswith("Source:") and any(x.startswith("Target:") for x in row_values):
+            source_matrix = row_values[0].split(":", 1)[-1].strip()
+            target_matrix = ""
+            for val in row_values:
+                if val.startswith("Target:"):
+                    target_matrix = val.split(":", 1)[-1].strip()
+                    break
+            source_bus = infer_bus_code(source_matrix)
+            target_bus = infer_bus_code(target_matrix)
+            block_header = f"# ----------- {source_bus} -> {target_bus} ----------------"
+            if block_header != last_buspair:
+                if not first_block:
+                    ini_lines.append("")
+                ini_lines.append(block_header)
+                last_buspair = block_header
+                first_block = False
+            continue
+        if "Message Name" in row_values or "Message ID" in row_values:
+            try:
+                s_name_idx = row_values.index("Message Name")
+                s_id_idx = row_values.index("Message ID")
+                d_name_idx = row_values.index("Message Name", s_name_idx + 1)
+                d_id_idx = row_values.index("Message ID", s_id_idx + 1)
+            except ValueError:
+                continue
+            continue
+        if (
+            source_matrix and target_matrix and
+            len(row_values) > max(d_id_idx, s_name_idx, d_name_idx, s_id_idx)
+            and row_values[s_name_idx] and row_values[d_name_idx]
+            and row_values[s_id_idx] and row_values[d_id_idx]
+            and not any(
+                row_values[x].strip().startswith("Message") or
+                row_values[x].strip().startswith("Signal")
+                for x in [s_name_idx, d_name_idx]
+            )
+        ):
+            ini_lines.append(f"SourceMsg{entry_num}_Name = {row_values[s_name_idx]}")
+            ini_lines.append(f"SourceMsg{entry_num}_ID = {row_values[s_id_idx]}")
+            ini_lines.append(f"SourceMsg{entry_num}_CAN = {source_bus}CAN")
+            ini_lines.append(f"DestiMsg{entry_num}_Name = {row_values[d_name_idx]}")
+            ini_lines.append(f"DestiMsg{entry_num}_ID = {row_values[d_id_idx]}")
+            ini_lines.append(f"DestiMsg{entry_num}_CAN = {target_bus}CAN")
+            ini_lines.append(f"ChangReMsg{entry_num} = 0")
+            entry_num += 1
+
+    while ini_lines and ini_lines[0] == "":
+        ini_lines.pop(0)
+    while ini_lines and ini_lines[-1] == "":
+        ini_lines.pop()
+    return '\n'.join(ini_lines)
+
+@app.route("/", methods=["GET", "POST"])
+def upload():
+    if request.method == "POST":
+        f = request.files["excel"]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            f.save(tmp.name)
+            ini_content = excel_to_ini(tmp.name)
+        os.unlink(tmp.name)
+        result_file = tempfile.NamedTemporaryFile(delete=False, suffix=".ini")
+        with open(result_file.name, "w", encoding="utf-8") as outf:
+            outf.write(ini_content)
+        return send_file(result_file.name, as_attachment=True, download_name="MsgRouterInfo.ini")
+    return render_template_string(HTML_FORM)
+
+if __name__ == "__main__":
+    app.run(debug=True)
